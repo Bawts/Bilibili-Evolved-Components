@@ -5,8 +5,6 @@
 (() => {
   'use strict'
 
-  // 组件代码运行在 Bilibili-Evolved 的沙箱里, 直接调用 window 上的原生方法可能会因为
-  // this 绑定不是真正的 window 而报 Illegal invocation, 所以统一走 unsafeWindow。
   const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window
   const D = W.document
 
