@@ -850,6 +850,57 @@
         return null
       }
 
+      // ==================== 原生动画还原 ====================
+      // 官方「换一换」的箭头转圈并不是 CSS 动画: 每次点击都把按钮内 svg 的内联
+      // transform 增加 360°(Vue RollButton: rotate(count*360deg)), 再借
+      // .roll-btn svg 的 transition: transform .5s ease 转上一圈。本组件的点击接管会
+      // 把官方 Vue 回调整个拦掉, 这里照官方逻辑补上这一圈 —— 观感与原生完全一致,
+      // 只动 svg 自身的内联样式, 不影响按钮外观与按压动画。
+      function svgCurrentDeg(svg) {
+        var s = ''
+        try {
+          s = svg.style && svg.style.transform ? svg.style.transform : ''
+        } catch (err) {
+          s = ''
+        }
+        if (!s || s === 'none') return 0
+        // 官方与本组件写入的格式都是 rotate(Ndeg), 直接解析这个累加值即可。
+        // 千万别用矩阵反解角度(atan2): 它只能给出 -180~180 的主值, 360/720…
+        // 会被读成 0°, 导致下一次写入与当前相同的值, transition 不再触发,
+        // 表现就是“只有第一下会转”。
+        var mm = String(s).match(/rotate\(\s*(-?\d*\.?\d+)deg\s*\)/)
+        if (mm) return parseFloat(mm[1]) || 0
+        return 0
+      }
+
+      function playNativeSpin(btn) {
+        try {
+          var scope = btn
+          for (var i = 0; i < 4 && scope; i++) {
+            var svg = scope.querySelector && scope.querySelector('svg')
+            if (svg) {
+              svg.style.transform = 'rotate(' + (svgCurrentDeg(svg) + 360) + 'deg)'
+              return
+            }
+            scope = scope.parentElement
+          }
+        } catch (err) { /* 忽略 */ }
+      }
+
+      // 「换一换按钮位置自定义」会把按钮或它的外层容器写成 translate / position:fixed,
+      // 该组件的“点击后回顶”监听同样被拦截拦掉; 这里向上多找几层, 样式命中了再补回顶。
+      function hasMoveStyle(node) {
+        var el = node
+        for (var i = 0; i < 5 && el; i++) {
+          try {
+            var st = el.getAttribute ? (el.getAttribute('style') || '') : ''
+            if (/translate\(|position:\s*fixed/i.test(st)) return true
+          } catch (err) { /* 忽略 */ }
+          el = el.parentElement
+        }
+        return false
+      }
+
       // 点击「换一换」按钮：由本组件整体接管这次刷新。阻止原生“整列替换”与组件改写同时进行
       // （两套动作打架 = “换完又被换回去 / 二次加载”的闪烁根源）。内部兜底的
       // 程序化点击（isTrusted=false）自动放行，只记录按钮位置、不再触发新一轮刷新。
@@ -864,11 +915,12 @@
             e.stopPropagation()
             if (e.stopImmediatePropagation) e.stopImmediatePropagation()
           } catch (err) { /* 忽略 */ }
-          // 「换一换按钮位置自定义」把按钮移过位 / 固定时，其“点击后回顶”副作用会被上面的
-          // stopPropagation 一并拦掉，这里按同样逻辑补一次（按钮被自定义过才补）。
+          // 原生动画还原: 官方箭头自转的 Vue 回调被上面拦掉, 手动补一圈(只动 svg)
+          playNativeSpin(btn)
+          // 「换一换按钮位置自定义」把按钮/外层容器移过位或固定时, 其“点击后回顶”副作用
+          // 也会被上面的 stopPropagation 一并拦掉, 这里向上多找几层补一次(命中了才补)。
           try {
-            var st = btn.getAttribute('style') || ''
-            if (/translate\(|position:\s*fixed/i.test(st)) {
+            if (hasMoveStyle(btn)) {
               setTimeout(function () {
                 try { global.scrollTo({ top: 0, behavior: 'smooth' }) } catch (err) { global.scrollTo(0, 0) }
               }, 0)

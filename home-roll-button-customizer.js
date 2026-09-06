@@ -136,6 +136,31 @@
     return byText ? promoteToWrapper(byText) : null
   }
 
+  // 官方通常把「换一换」按钮放在一个自带的绝对定位容器里(典型如 .feed-roll-btn),
+  // 按钮只是容器的子元素。优先把位移写到这个容器上 —— 按钮元素自身不带任何内联样式,
+  // 官方的 hover 背景、按压反馈(:active 的 transform: scale(.95)) 与点击后图标自转
+  // 动画就全部保持原样, 真正做到「只改位置, 不改样式」。
+  const CONTROL_SELECTORS = ['.feed-roll-btn']
+
+  const findControl = () => {
+    const el = findButton()
+    if (!el) {
+      return null
+    }
+    for (let i = 0; i < CONTROL_SELECTORS.length; i++) {
+      try {
+        const wrap = el.closest(CONTROL_SELECTORS[i])
+        if (wrap && wrap !== el && wrap !== D.body && wrap.getBoundingClientRect().width > 0) {
+          return wrap
+        }
+      } catch (e) {
+        /* 选择器不合法则忽略 */
+      }
+    }
+    // 没有官方容器时退回原来的智能提升; 仍找不到合适的壳才直接动按钮(极端兜底)
+    return promoteToWrapper(el) || el
+  }
+
   /* ---------------------------------------------------------------- 运行状态 */
 
   let options = {}
@@ -281,6 +306,9 @@
   const fixedCss = (left, top) =>
     [
       'position: fixed',
+      // 官方容器 .feed-roll-btn 自带 translateX(10px) 之类的 transform, fixed 落位后必须
+      // 清掉, 否则实测位置会整体偏移, 永远匹配不上 → 白白退回滚动跟随方案
+      'transform: none',
       `left: ${left}px`,
       `top: ${top}px`,
       `width: ${buttonBase.width}px`,
@@ -292,6 +320,30 @@
     ]
       .map((decl) => `${decl} !important`)
       .join(';')
+
+  // 读取被移动元素「官方自带」的 CSS transform 平移量(调用前必须已清掉本组件的内联样式)。
+  // 官方给容器写了 translateX(10px) 之类的位移, 若直接覆盖, 视觉上会突然跳一下;
+  // 把用户偏移叠加在官方位移之上, 才能做到零跳变。
+  const readNativeTranslate = () => {
+    try {
+      const cs = W.getComputedStyle(button).transform
+      if (!cs || cs === 'none') {
+        return { x: 0, y: 0 }
+      }
+      if (typeof W.DOMMatrix === 'function') {
+        const m = new W.DOMMatrix(cs)
+        return { x: m.e || 0, y: m.f || 0 }
+      }
+      const mm = cs.match(/matrix\(([^)]+)\)/)
+      if (mm) {
+        const p = mm[1].split(',').map((s) => Number(s.trim()))
+        return { x: p[4] || 0, y: p[5] || 0 }
+      }
+    } catch (e) {
+      /* 忽略 */
+    }
+    return { x: 0, y: 0 }
+  }
 
   const positionMatches = (left, top) => {
     const rect = button.getBoundingClientRect()
@@ -321,7 +373,7 @@
       return true
     }
     restoreButton()
-    const found = findButton()
+    const found = findControl()
     if (!found) {
       return false
     }
@@ -360,8 +412,11 @@
       return
     }
 
-    const offsetX = toNumber(options.offsetX, 0)
-    const offsetY = toNumber(options.offsetY, 0)
+    // 粗调 + 微调两个滑块相加, 旧的“像素”设置语义不变
+    const offsetX =
+      toNumber(options.offsetX, 0) + toNumber(options.offsetXFine, 0)
+    const offsetY =
+      toNumber(options.offsetY, 0) + toNumber(options.offsetYFine, 0)
 
     if (!options.fixed) {
       stopFloat()
@@ -369,11 +424,20 @@
       resetStyle()
       // 两个偏移都是 0 时干脆什么都不加, 保证按钮与原生状态完全一致
       if (offsetX !== 0 || offsetY !== 0) {
-        setButtonStyle(`transform: translate(${offsetX}px, ${offsetY}px) !important;`)
+        // 位移只写在「外层容器」上且叠加容器官方的 transform。按钮元素自身绝不能出现
+        // 内联 transform —— 官方按压反馈是 .primary-btn:active { transform: scale(.95) },
+        // 只要按钮上有内联 transform(哪怕不带 !important)就会被覆盖, 按压动画即消失;
+        // 而 svg 的转圈动画属于 svg 自身, 也不要去动它。
+        const native = readNativeTranslate()
+        setButtonStyle(
+          `transform: translate(${native.x + offsetX}px, ${native.y + offsetY}px) !important;`
+        )
       }
       return
     }
 
+    // 固定/滚动跟随前重新量一次自然位置, 避免窗口或页面布局变化后停留在旧坐标
+    buttonBase = measureBase()
     const maxLeft = Math.max(0, W.innerWidth - buttonBase.width)
     const maxTop = Math.max(0, W.innerHeight - buttonBase.height)
     targetLeft = clamp(buttonBase.left + offsetX, 0, maxLeft)
@@ -467,13 +531,23 @@
     options: {
       offsetX: {
         defaultValue: 0,
-        displayName: '左右位置 (像素)',
+        displayName: '左右位置 (粗调)',
         slider: { min: -1000, max: 1000, step: 1 },
+      },
+      offsetXFine: {
+        defaultValue: 0,
+        displayName: '左右微调 (±30, 拖到大概位置后用这个精确定位)',
+        slider: { min: -30, max: 30, step: 1 },
       },
       offsetY: {
         defaultValue: 0,
-        displayName: '上下位置 (像素)',
+        displayName: '上下位置 (粗调)',
         slider: { min: -1000, max: 1000, step: 1 },
+      },
+      offsetYFine: {
+        defaultValue: 0,
+        displayName: '上下微调 (±30, 拖到大概位置后用这个精确定位)',
+        slider: { min: -30, max: 30, step: 1 },
       },
       fixed: {
         defaultValue: false,
@@ -497,7 +571,15 @@
       // 选项变化时立即生效(滑块在设置面板里有 200ms 防抖)
       const settingsApi = coreApis && coreApis.settings
       if (settingsApi && typeof settingsApi.addComponentListener === 'function') {
-        ;['offsetX', 'offsetY', 'fixed', 'scrollToTopOnClick', 'buttonSelector'].forEach((key) => {
+        ;[
+          'offsetX',
+          'offsetY',
+          'offsetXFine',
+          'offsetYFine',
+          'fixed',
+          'scrollToTopOnClick',
+          'buttonSelector',
+        ].forEach((key) => {
           settingsApi.addComponentListener(`${COMPONENT_NAME}.${key}`, () => apply())
         })
       }
