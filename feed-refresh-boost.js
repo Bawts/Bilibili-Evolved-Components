@@ -1,0 +1,962 @@
+/**
+ * Bilibili Evolved 自定义组件：换一换 · 刷新更多卡片  feed-refresh-boost  (v2)
+ */
+;(function (global) {
+  'use strict'
+
+  // ==================== WBI 签名 ====================
+  var MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+  ]
+  var MD5_S = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+  ]
+  var MD5_K = (function () {
+    var k = []
+    for (var i = 0; i < 64; i++) k.push(Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0)
+    return k
+  })()
+
+  function md5Hex(str) {
+    var bytes = new TextEncoder().encode(String(str))
+    var bitLen = bytes.length * 8
+    var total = (((bytes.length + 8) >> 6) + 1) << 6
+    var padded = new Uint8Array(total)
+    padded.set(bytes)
+    padded[bytes.length] = 0x80
+    var dv = new DataView(padded.buffer)
+    dv.setUint32(total - 8, bitLen >>> 0, true)
+    dv.setUint32(total - 4, Math.floor(bitLen / 4294967296), true)
+    var a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476
+    for (var off = 0; off < total; off += 64) {
+      var M = []
+      for (var j = 0; j < 16; j++) M.push(dv.getUint32(off + j * 4, true))
+      var A = a0, B = b0, C = c0, D = d0
+      for (var i = 0; i < 64; i++) {
+        var F, g
+        if (i < 16) { F = (B & C) | (~B & D); g = i }
+        else if (i < 32) { F = (B & D) | (C & ~D); g = (5 * i + 1) % 16 }
+        else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) % 16 }
+        else { F = C ^ (B | ~D); g = (7 * i) % 16 }
+        F = (F + A + MD5_K[i] + M[g]) >>> 0
+        A = D; D = C; C = B
+        B = (B + ((F << MD5_S[i]) | (F >>> (32 - MD5_S[i])))) >>> 0
+      }
+      a0 = (a0 + A) >>> 0
+      b0 = (b0 + B) >>> 0
+      c0 = (c0 + C) >>> 0
+      d0 = (d0 + D) >>> 0
+    }
+    function hexWord(n) {
+      var s = ''
+      for (var i = 0; i < 4; i++) {
+        var b = (n >>> (i * 8)) & 0xff
+        s += (b < 16 ? '0' : '') + b.toString(16)
+      }
+      return s
+    }
+    return hexWord(a0) + hexWord(b0) + hexWord(c0) + hexWord(d0)
+  }
+
+  function getMixinKey(orig) {
+    var s = ''
+    for (var i = 0; i < MIXIN_KEY_ENC_TAB.length; i++) s += orig.charAt(MIXIN_KEY_ENC_TAB[i])
+    return s.slice(0, 32)
+  }
+
+  function encWbi(params, imgKey, subKey) {
+    var mixinKey = getMixinKey(imgKey + subKey)
+    var out = {}
+    Object.keys(params).forEach(function (k) { out[k] = params[k] })
+    delete out.w_rid
+    delete out.wts
+    out.wts = Math.round(Date.now() / 1000)
+    var keys = Object.keys(out).sort()
+    var parts = []
+    for (var i = 0; i < keys.length; i++) {
+      var v = String(out[keys[i]]).replace(/[!'()*]/g, '')
+      parts.push(encodeURIComponent(keys[i]) + '=' + encodeURIComponent(v))
+    }
+    var query = parts.join('&')
+    return query + '&w_rid=' + md5Hex(query + mixinKey)
+  }
+
+  // ==================== 工具 ====================
+  var RCMD_DEFAULT_PATH = 'https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd'
+
+  function parseQuery(url) {
+    var out = {}
+    var idx = url.indexOf('?')
+    if (idx === -1) return out
+    url.slice(idx + 1).split('&').forEach(function (kv) {
+      if (!kv) return
+      var p = kv.indexOf('=')
+      if (p === -1) return
+      out[decodeURIComponent(kv.slice(0, p))] = decodeURIComponent(kv.slice(p + 1))
+    })
+    return out
+  }
+
+  function toHttps(u) {
+    if (!u) return ''
+    if (u.indexOf('//') === 0) return 'https:' + u
+    return u.replace(/^http:\/\//, 'https://')
+  }
+
+  function coverUrl(pic) {
+    var u = toHttps(pic)
+    if (!u) return ''
+    if (u.indexOf('@') === -1) u += '@672w_378h_1c.webp'
+    return u
+  }
+
+  function formatCount(n) {
+    n = Number(n) || 0
+    if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, '') + '亿'
+    if (n >= 10000) return (n / 10000).toFixed(1).replace(/\.0$/, '') + '万'
+    return String(n)
+  }
+
+  function formatDuration(sec) {
+    sec = Number(sec)
+    if (!isFinite(sec) || sec <= 0) return ''
+    var h = Math.floor(sec / 3600)
+    var m = Math.floor((sec % 3600) / 60)
+    var s = Math.floor(sec % 60)
+    function pad(x) { return x < 10 ? '0' + x : String(x) }
+    return h > 0 ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s)
+  }
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms) }) }
+
+  // ==================== 组件 ====================
+  function createComponent(coreApis, componentsTags) {
+    var define = coreApis.componentApis.define
+    var addComponentListener = coreApis.settings.addComponentListener
+
+    var optionsMeta = {
+      刷新数量: {
+        displayName: '刷新数量 (张)',
+        defaultValue: 15,
+        slider: { min: 1, max: 60, step: 1 },
+      },
+      手动输入数量: {
+        displayName: '手动输入数量（填数字优先，留空用滑块）',
+        defaultValue: '',
+      },
+      显示提示: { displayName: '显示提示', defaultValue: true },
+      过渡动画: { displayName: '切换动画（默认关闭 = 官方同款直换；开启为短暂淡入淡出）', defaultValue: false },
+      预取下一批: { displayName: '预取下一批（点击零等待）', defaultValue: true },
+      调试日志: { displayName: '调试日志（控制台）', defaultValue: true },
+    }
+    var options = define.defineOptionsMetadata(optionsMeta)
+
+    var state = { count: 15, manual: '', toast: true, debug: true, fade: true, prefetch: true }
+
+    function getCount() {
+      var m = parseInt(state.manual, 10)
+      if (!isNaN(m) && m > 0) return Math.min(m, 60)
+      return Math.max(1, Number(state.count) || 15)
+    }
+
+    function log() {
+      if (!state.debug) return
+      try {
+        var args = ['[换一换扩展]']
+        for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+        console.log.apply(console, args)
+      } catch (e) { /* 忽略 */ }
+    }
+
+    function toast(msg, ms) {
+      if (!state.toast) return
+      try {
+        var el = document.createElement('div')
+        el.textContent = msg
+        el.style.cssText =
+          'position:fixed;right:24px;bottom:80px;z-index:2147483000;max-width:320px;' +
+          'background:rgba(0,0,0,.85);color:#fff;padding:8px 14px;border-radius:8px;' +
+          'font-size:13px;line-height:1.5;pointer-events:none;transition:opacity .3s'
+        document.body.appendChild(el)
+        setTimeout(function () {
+          el.style.opacity = '0'
+          setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el) }, 400)
+        }, ms || 4000)
+      } catch (e) { /* 忽略 */ }
+    }
+
+    // 预加载封面：把图片先下载进缓存，改写时才能"同一帧"一起变脸，
+    // 否则标题先变、封面后到，看起来就是各自刷新 + 重影
+    function preloadCovers(items, ms) {
+      return new Promise(function (resolve) {
+        var urls = []
+        items.forEach(function (it) {
+          if (it && it.pic) urls.push(coverUrl(it.pic))
+        })
+        if (!urls.length) return resolve()
+        var left = urls.length
+        var finished = false
+        function finish() {
+          if (finished) return
+          finished = true
+          resolve()
+        }
+        var timer = setTimeout(finish, ms || 1800)
+        urls.forEach(function (u) {
+          var im = new Image()
+          im.onload = im.onerror = function () {
+            left--
+            if (left <= 0) {
+              clearTimeout(timer)
+              finish()
+            }
+          }
+          im.src = u
+        })
+      })
+    }
+
+    // 可选的过渡：先淡出再淡入，让 15 张看起来是"整体刷新"而不是逐张替换
+    function fadeCards(cards, n, on) {
+      if (!state.fade) return
+      try {
+        for (var i = 0; i < n && i < cards.length; i++) {
+          cards[i].style.transition = 'opacity .15s ease'
+          cards[i].style.opacity = on ? '0.15' : ''
+        }
+        if (!on) {
+          setTimeout(function () {
+            for (var k = 0; k < n && k < cards.length; k++) cards[k].style.transition = ''
+          }, 250)
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+
+    // ---- 抓取到的接口信息 ----
+    var lastParams = null
+    var lastPath = RCMD_DEFAULT_PATH
+    var lastNativeItems = []
+    var lastNativeAt = 0
+    var btnEl = null
+    var busy = false
+    var pendingBoost = false
+    var prefetched = []
+    var prefetchedAt = 0
+    var warming = false
+
+    // ---- 卡片改写 ----
+    var FEED_SELECTORS = [
+      'main > .feed2 > .recommended-container_floor-aside > .container',
+      '#i_cecream .recommended-container_floor-aside > .container',
+      '.recommended-container_floor-aside > .container',
+      '.recommended-container_floor-aside .container',
+      'main .recommended-container_floor-aside',
+      '.recommended-container_floor-aside',
+      'main > .feed2',
+      '#i_cecream',
+    ]
+
+    var lastCardsSelector = ''
+    var lastCardsRaw = 0
+
+    // 过滤掉"看不见的卡片"：轮播区内部、被隐藏的、尺寸异常的
+    // （首页轮播 .recommended-swipe 里的卡片也是 .bili-video-card，排在 DOM 最前面，
+    //   不过滤的话会白白吃掉前几张的名额）
+    function usableCard(el) {
+      try {
+        var p = el.parentElement
+        for (var i = 0; i < 6 && p; i++) {
+          var cls = typeof p.className === 'string' ? p.className : ''
+          if (cls && /recommended-swipe|swipe|carousel|bili-live-card/.test(cls)) return false
+          p = p.parentElement
+        }
+        var r = el.getBoundingClientRect()
+        if (r.width < 60 || r.height < 60) return false
+        if (el.offsetParent === null) {
+          var cs = global.getComputedStyle ? global.getComputedStyle(el) : null
+          if (!cs || cs.position !== 'fixed') return false
+        }
+        return true
+      } catch (e) {
+        return true
+      }
+    }
+
+    function getCards() {
+      var i, all = []
+      for (i = 0; i < FEED_SELECTORS.length; i++) {
+        var el = document.querySelector(FEED_SELECTORS[i])
+        if (!el) continue
+        var found = el.querySelectorAll('.bili-video-card')
+        if (found && found.length) {
+          lastCardsSelector = FEED_SELECTORS[i]
+          all = Array.prototype.slice.call(found)
+          break
+        }
+      }
+      if (!all.length) {
+        lastCardsSelector = 'document'
+        all = Array.prototype.slice.call(document.querySelectorAll('.bili-video-card'))
+      }
+      lastCardsRaw = all.length
+      var out = all.filter(usableCard)
+      return out.length ? out : all
+    }
+
+    var dumped = false
+    function dumpCardHtml(cards) {
+      if (dumped || !state.debug) return
+      dumped = true
+      try {
+        log('卡片数：过滤前 ' + lastCardsRaw + '，过滤后 ' + cards.length + '，容器 ' + lastCardsSelector)
+        if (cards[0]) log('卡片1 HTML: ' + cards[0].outerHTML.slice(0, 1400))
+        if (cards[9]) log('卡片10 HTML: ' + cards[9].outerHTML.slice(0, 1400))
+      } catch (e) { /* 忽略 */ }
+    }
+
+    function bvidOf(card) {
+      if (!card) return ''
+      var a = card.querySelector('a[href*="/video/"]')
+      if (!a) return ''
+      var m = (a.getAttribute('href') || '').match(/(BV[0-9A-Za-z]+)/)
+      return m ? m[1] : ''
+    }
+
+    function screenBvids(max) {
+      var out = {}
+      getCards().slice(0, max || 60).forEach(function (c) {
+        var b = bvidOf(c)
+        if (b) out[b] = true
+      })
+      return out
+    }
+
+    function isValidItem(it) {
+      return !!(it && it.bvid && it.pic && it.title)
+    }
+
+    function patchCard(card, item, verbose) {
+      var hit = { img: 0, title: 0, up: 0, stats: 0, dur: 0, links: 0 }
+      try {
+        if (!card || !item) return false
+        var bvid = item.bvid
+        var href = '/video/' + bvid
+
+        var vlinks = card.querySelectorAll('a[href*="/video/"]')
+        var i
+        for (i = 0; i < vlinks.length; i++) {
+          vlinks[i].setAttribute('href', href)
+          if (!vlinks[i].getAttribute('target')) vlinks[i].setAttribute('target', '_blank')
+          hit.links++
+        }
+
+        if (item.pic) {
+          var cover = coverUrl(item.pic)
+          var img =
+            card.querySelector('.bili-video-card__image img') ||
+            card.querySelector('.bili-video-card__cover img') ||
+            card.querySelector('picture img') ||
+            card.querySelector('img')
+          if (img) {
+            hit.img = 1
+            img.removeAttribute('srcset')
+            img.removeAttribute('data-src')
+            img.setAttribute('src', cover)
+            img.setAttribute('alt', item.title)
+            // picture > source 会抢在 img 前面生效，必须一起改
+            var sources = card.querySelectorAll('picture source')
+            for (i = 0; i < sources.length; i++) {
+              sources[i].removeAttribute('srcset')
+              sources[i].setAttribute('srcset', cover)
+            }
+          } else {
+            // 极端情况：卡片里没有 img，直接给图片容器铺背景图
+            var wrap = card.querySelector(
+              '.bili-video-card__image, .bili-video-card__image--wrap, .bili-video-card__cover'
+            )
+            if (wrap) {
+              hit.img = 2
+              wrap.style.backgroundImage = 'url("' + cover + '")'
+              wrap.style.backgroundSize = 'cover'
+            }
+          }
+        }
+
+        var titleA =
+          card.querySelector('.bili-video-card__info--tit a') ||
+          card.querySelector('h3 a') ||
+          (vlinks.length ? vlinks[vlinks.length - 1] : null)
+        if (titleA && item.title) {
+          hit.title = 1
+          titleA.textContent = item.title
+          titleA.setAttribute('title', item.title)
+          if (verbose) log('   标题元素: ' + titleA.outerHTML.slice(0, 240))
+        }
+
+        if (item.owner && item.owner.name) {
+          var up = card.querySelector(
+            '.bili-video-card__info--author, .bili-video-card__info--up a, [class*="info--author"]'
+          )
+          if (up) {
+            hit.up = 1
+            up.textContent = item.owner.name
+            up.setAttribute('title', item.owner.name)
+            if (up.tagName === 'A' && item.owner.mid) {
+              up.setAttribute('href', '//space.bilibili.com/' + item.owner.mid)
+            }
+          }
+        }
+
+        var stats = card.querySelectorAll('.bili-video-card__stats--text')
+        if (stats.length === 0) stats = card.querySelectorAll('.bili-video-card__stats span')
+        if (item.stat) {
+          if (stats[0] && item.stat.view !== undefined) stats[0].textContent = formatCount(item.stat.view)
+          if (stats[1] && item.stat.danmaku !== undefined) stats[1].textContent = formatCount(item.stat.danmaku)
+          hit.stats = stats.length
+        }
+        if (item.duration) {
+          var dur = card.querySelector('.bili-video-card__stats__duration, [class*="stats__duration"]')
+          var ds = formatDuration(item.duration)
+          if (dur && ds) { hit.dur = 1; dur.textContent = ds }
+        }
+
+        card.setAttribute('data-be-boosted', bvid)
+        if (verbose) log('  卡片细节 ' + JSON.stringify(hit))
+        return true
+      } catch (e) {
+        if (verbose) log('  卡片改写异常', e)
+        return false
+      }
+    }
+
+    function applyItems(items, verboseIdx) {
+      var cards = getCards()
+      var n = Math.min(items.length, cards.length)
+      var done = 0
+      for (var i = 0; i < n; i++) {
+        var verbose = verboseIdx && verboseIdx.indexOf(i) !== -1
+        if (verbose) log('  第 ' + (i + 1) + ' 张卡片改写：')
+        if (patchCard(cards[i], items[i], verbose)) done++
+      }
+      return done
+    }
+
+    // ---- 守卫：改完后 15 秒内逐张校验，被 Vue 覆盖就改回来 ----
+    var guardItems = []
+    var guardUntil = 0
+    var lastBoostAt = 0
+    var repairCount = 0
+
+    function armGuard(items) {
+      guardItems = items.slice()
+      guardUntil = Date.now() + 15000
+      lastBoostAt = Date.now()
+      repairCount = 0
+    }
+
+    function verifyAndRepair() {
+      if (!guardItems.length) return
+      if (Date.now() > guardUntil) {
+        guardItems = []
+        return
+      }
+      var cards = getCards()
+      var fixed = 0
+      for (var i = 0; i < guardItems.length && i < cards.length; i++) {
+        if (!cardMatches(cards[i], guardItems[i])) {
+          patchCard(cards[i], guardItems[i])
+          fixed++
+        }
+      }
+      if (fixed && repairCount < 6) {
+        repairCount++
+        log('守卫修复 ' + fixed + ' 张（第 ' + repairCount + ' 轮）')
+      }
+    }
+
+    // 判断某张卡片是否已经是我们想要的内容（BV 号 + 封面文件名都要对得上）
+    function cardMatches(card, item) {
+      if (!card || !item) return true
+      var cb = bvidOf(card)
+      if (cb !== item.bvid) return false
+      try {
+        var img = card.querySelector('picture img, img')
+        var src = card.querySelector('picture source')
+        if (img && item.pic) {
+          var want = coverUrl(item.pic).split('/').pop().split('@')[0]
+          if (!want) return true
+          var cur = (img.getAttribute('src') || '') + '|' + (src ? src.getAttribute('srcset') || '' : '')
+          if (cur.indexOf(want) === -1) return false
+        }
+      } catch (e) { /* 忽略 */ }
+      return true
+    }
+
+    function startGuard() {
+      if (global.__beBoostGuard) return
+      global.__beBoostGuard = true
+      setInterval(verifyAndRepair, 400)
+    }
+
+    // ---- WBI key ----
+    var wbiKeys = null
+    function getWbiKeys() {
+      if (wbiKeys) return Promise.resolve(wbiKeys)
+      return fetch('https://api.bilibili.com/x/web-interface/nav', { credentials: 'include' })
+        .then(function (r) { return r.json() })
+        .then(function (json) {
+          var w = json && json.data && json.data.wbi_img
+          if (!w || !w.img_url || !w.sub_url) {
+            log('nav 未返回 wbi_img，json.code =', json && json.code)
+            return null
+          }
+          function base(u) { return String(u).split('/').pop().split('.')[0] }
+          wbiKeys = { img: base(w.img_url), sub: base(w.sub_url) }
+          log('WBI key 获取成功')
+          return wbiKeys
+        })
+        .catch(function (e) { log('nav 请求失败', e); return null })
+    }
+
+    function defaultParams() {
+      var w = global.screen ? global.screen.width : 1920
+      var h = global.screen ? global.screen.height : 1080
+      return {
+        web_location: '1430654',
+        feed_version: 'V8',
+        homepage_ver: '1',
+        fresh_type: '4',
+        brush: '1',
+        fresh_idx: '1',
+        fresh_idx_1h: '1',
+        fetch_row: '1',
+        y_num: '4',
+        last_y_num: '5',
+        screen: w + '-' + h,
+      }
+    }
+
+    function buildParams(ps, round) {
+      var p = lastParams ? Object.assign({}, lastParams) : defaultParams()
+      p.ps = ps
+      if ('fresh_idx' in p) p.fresh_idx = String((parseInt(p.fresh_idx, 10) || 0) + round)
+      if ('fresh_idx_1h' in p) p.fresh_idx_1h = String((parseInt(p.fresh_idx_1h, 10) || 0) + round)
+      if ('brush' in p) p.brush = '1'
+      return p
+    }
+
+    function requestBatch(ps, round) {
+      return getWbiKeys().then(function (keys) {
+        if (!keys) return []
+        var params = buildParams(ps, round)
+        var url = lastPath + '?' + encWbi(params, keys.img, keys.sub)
+        log('补货请求 ps=' + ps, url.slice(0, 200))
+        return fetch(url, { credentials: 'include' })
+          .then(function (r) { return r.json() })
+          .then(function (json) {
+            if (!json || json.code !== 0) {
+              log('补货失败 code=' + (json && json.code) + ' msg=' + (json && json.message))
+              return []
+            }
+            var items = (json.data && json.data.item) || []
+            log('补货返回 ' + items.length + ' 条')
+            return items
+          })
+          .catch(function (e) { log('补货请求异常', e); return [] })
+      })
+    }
+
+    // 空闲时先把下一批数据和封面准备好，点击时就能立刻改写，不用等网络
+    function warmup() {
+      if (!state.prefetch || warming || prefetched.length) return
+      warming = true
+      var target = getCount()
+      requestBatch(Math.min(target + 8, 30), 1)
+        .then(function (items) {
+          prefetched = items || []
+          prefetchedAt = Date.now()
+          warming = false
+          log('已预取 ' + prefetched.length + ' 条，后台预热封面')
+          return preloadCovers(prefetched.slice(0, target), 4000)
+        })
+        .catch(function () { warming = false })
+    }
+
+    // ---- 主流程 ----
+    function scheduleBoost(reason) {
+      if (busy) {
+        // 上一次还没结束：记下这次点击，结束后只补一次，不丢点击也不连点
+        pendingBoost = true
+        log('排队一次刷新（上一次还未完成）')
+        return
+      }
+      boost(reason)
+    }
+
+    // 收尾：解除忙碌标记；期间用户又点了「换一换」的话，结束后补这一次
+    function finish() {
+      busy = false
+      if (pendingBoost) {
+        pendingBoost = false
+        setTimeout(function () { boost('click') }, 120)
+      }
+    }
+
+    function boost(reason) {
+      if (busy) { log('正在处理中，忽略触发：' + reason); return }
+      busy = true
+      log('开始刷新，触发来源：' + reason)
+
+      var target = getCount()
+      var screen = screenBvids(60)
+      var pool = []
+      var seen = {}
+
+      function push(items) {
+        if (!items || !items.length) return 0
+        var added = 0
+        items.forEach(function (it) {
+          if (!isValidItem(it)) return
+          if (seen[it.bvid]) return
+          if (screen[it.bvid]) return
+          seen[it.bvid] = true
+          pool.push(it)
+          added++
+        })
+        return added
+      }
+
+      // 第一批：之前预取好的（最快，几乎零等待）
+      if (prefetched.length) {
+        log('用上预取的 ' + prefetched.length + ' 条')
+        push(prefetched)
+        prefetched = []
+      }
+
+      // 第二批：原生刚返回的那批（如果有）
+      if (Date.now() - lastNativeAt < 5000) {
+        log('取用原生返回的 ' + lastNativeItems.length + ' 条')
+        push(lastNativeItems)
+      }
+
+      // 第二批：自己带签名请求
+      var round = 0
+      function fillByRequest() {
+        if (pool.length >= target || round >= 4) return Promise.resolve()
+        round++
+        var need = Math.min(Math.max(target - pool.length + 5, 8), 30)
+        return requestBatch(need, round).then(function (items) {
+          var before = pool.length
+          push(items)
+          if (pool.length === before) return Promise.resolve()
+          return fillByRequest()
+        })
+      }
+
+      // 兜底：自有接口一条都没取到时，才放行一次原生换一换（平时不打扰原生，避免两套刷新打架造成闪烁）
+      function fallbackNative() {
+        if (pool.length || !btnEl) return Promise.resolve()
+        log('自有接口没取到数据，放行一次原生换一换兜底')
+        // 程序化点击 isTrusted=false，上面的点击接管逻辑会自动放行、且不会再次触发刷新
+        try { btnEl.click() } catch (e) { /* 忽略 */ }
+        return sleep(900).then(function () { push(lastNativeItems) })
+      }
+
+      fillByRequest()
+        .then(fallbackNative)
+        .then(function () {
+          var use = pool.slice(0, target)
+          var cards = getCards()
+          dumpCardHtml(cards)
+          log('准备改写：目标 ' + target + ' 张，可用数据 ' + pool.length + ' 条，页面卡片 ' + cards.length + ' 张（过滤前 ' + lastCardsRaw + '）')
+          if (!use.length) {
+            log('没有拿到任何新数据，本次不做改动')
+            toast('换一换扩展：没拿到新数据（详见控制台日志）')
+            finish()
+            return
+          }
+          if (!cards.length) {
+            log('没找到视频卡片容器')
+            toast('换一换扩展：没找到卡片容器（详见控制台日志）')
+            finish()
+            return
+          }
+
+          function doneSwap(done) {
+            armGuard(use)
+            log('完成，实际改写 ' + done + ' 张')
+            if (done < target) {
+              toast('换一换：只刷了 ' + done + ' / ' + target + ' 张（接口给的新数据不够或卡片不足）')
+            } else if (state.toast) {
+              toast('换一换：已刷新 ' + done + ' 张卡片', 2000)
+            }
+            finish()
+            setTimeout(warmup, 1200)
+          }
+
+          // 官方式整帧替换：封面先全部进缓存（预加载期间画面保持不动），改写只在一个
+          // 同步帧内完成 —— 图片已在缓存里，换内容的那一帧不会出现“空白→加载”的闪白/闪黑。
+          var t0 = Date.now()
+          return preloadCovers(use, 1800).then(function () {
+            log('封面预加载耗时 ' + (Date.now() - t0) + 'ms')
+            var c2 = getCards()
+            if (!c2.length) { finish(); return }
+            if (state.fade) {
+              // 只有用户手动打开「过渡动画」时才做一次约 0.1s 的短促压暗过渡
+              fadeCards(c2, Math.min(use.length, c2.length), true)
+              setTimeout(function () {
+                try {
+                  var done = applyItems(use, [0, 8, 12])
+                  fadeCards(getCards(), Math.min(use.length, c2.length), false)
+                  doneSwap(done)
+                } catch (e) { log('改写异常', e); finish() }
+              }, 110)
+            } else {
+              try {
+                doneSwap(applyItems(use, [0, 8, 12]))
+              } catch (e) { log('改写异常', e); finish() }
+            }
+          })
+        })
+        .catch(function (e) {
+          log('流程异常', e)
+          finish()
+        })
+    }
+
+    // ---- 请求/响应拦截 ----
+    function isRcmdUrl(url) {
+      return typeof url === 'string' && url.indexOf('top/feed/rcmd') !== -1
+    }
+
+    function remember(url) {
+      lastParams = parseQuery(url)
+      lastPath = url.split('?')[0]
+      if (lastPath.indexOf('http') !== 0) {
+        lastPath = 'https://api.bilibili.com' + (lastPath.charAt(0) === '/' ? '' : '/') + lastPath
+      }
+      log('抓到推荐流接口参数：', Object.keys(lastParams).join(','))
+    }
+
+    function onRcmdResponse(json) {
+      try {
+        if (!json || json.code !== 0 || !json.data || !json.data.item) return
+        lastNativeItems = json.data.item
+        lastNativeAt = Date.now()
+        log('抓到原生返回 ' + json.data.item.length + ' 条')
+      } catch (e) { /* 忽略 */ }
+    }
+
+    function installHooks() {
+      if (global.__beBoostHooked) return
+      global.__beBoostHooked = true
+
+      var origFetch = global.fetch
+      if (origFetch) {
+        global.fetch = function (input, init) {
+          var url = typeof input === 'string' ? input : (input && input.url) || ''
+          var hit = isRcmdUrl(url)
+          if (hit) remember(url)
+          var p = origFetch.apply(this, arguments)
+          if (hit && p && typeof p.then === 'function') {
+            try {
+              p.then(function (res) {
+                try {
+                  if (res && res.clone) {
+                    res.clone().json().then(function (j) { onRcmdResponse(j) }).catch(function () {})
+                  }
+                } catch (e) { /* 忽略 */ }
+              }).catch(function () {})
+            } catch (e) { /* 忽略 */ }
+          }
+          return p
+        }
+        log('fetch 已接管')
+      }
+
+      var XHR = global.XMLHttpRequest
+      if (XHR) {
+        var origOpen = XHR.prototype.open
+        XHR.prototype.open = function (method, url) {
+          try { this.__beUrl = String(url) } catch (e) { /* 忽略 */ }
+          return origOpen.apply(this, arguments)
+        }
+        var origSend = XHR.prototype.send
+        XHR.prototype.send = function () {
+          var self = this
+          try {
+            if (this.__beUrl && isRcmdUrl(this.__beUrl)) {
+              remember(this.__beUrl)
+              this.addEventListener('loadend', function () {
+                try {
+                  var data = typeof self.response === 'string' ? JSON.parse(self.response) : self.response
+                  onRcmdResponse(data)
+                } catch (e) { /* 忽略 */ }
+              })
+            }
+          } catch (e) { /* 忽略 */ }
+          return origSend.apply(this, arguments)
+        }
+        log('XHR 已接管')
+      }
+
+      // 识别“真正的”换一换按钮，而不是 Evolved 设置面板里同名文字的行
+      // （本组件「换一换 · 刷新更多卡片」、位置自定义组件「换一换按钮位置自定义」的
+      //   设置条目都含“换一换”，若按文字兜底匹配会把它们的点击吞掉 → 设置页打不开）：
+      //   1) 命中按钮专属类名（roll-btn / change-btn / feed-roll-btn…）一定算；
+      //   2) 文字 / aria-label 命中时，必须真的落在首页推荐流容器
+      //      .recommended-container_floor-aside 里才算（设置面板是 overlay，不在容器内）。
+      function findRollButton(target) {
+        var el = target
+        var i
+        for (i = 0; i < 8 && el; i++) {
+          if (el.nodeType !== 1) { el = el.parentElement; continue }
+          var cls = typeof el.className === 'string' ? el.className : ''
+          if (cls.indexOf('feed-roll') !== -1 || /(^|\s)(roll-btn|change-btn)(\s|$)/.test(cls)) {
+            return el
+          }
+          el = el.parentElement
+        }
+        var inFeed = false
+        el = target
+        for (i = 0; i < 8 && el; i++) {
+          if (el.nodeType !== 1) { el = el.parentElement; continue }
+          try {
+            if (el.classList && el.classList.contains('recommended-container_floor-aside')) {
+              inFeed = true
+              break
+            }
+          } catch (err) { /* 忽略 */ }
+          el = el.parentElement
+        }
+        if (!inFeed) return null
+        el = target
+        for (i = 0; i < 8 && el; i++) {
+          if (el.nodeType !== 1) { el = el.parentElement; continue }
+          var txt = (el.textContent || '').trim()
+          var label = ''
+          try { label = (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title')) || '') } catch (err) { label = '' }
+          if ((txt && txt.length <= 12 && txt.indexOf('换一换') !== -1) || (label && label.indexOf('换一换') !== -1)) {
+            return el
+          }
+          el = el.parentElement
+        }
+        return null
+      }
+
+      // 点击「换一换」按钮：由本组件整体接管这次刷新。阻止原生“整列替换”与组件改写同时进行
+      // （两套动作打架 = “换完又被换回去 / 二次加载”的闪烁根源）。内部兜底的
+      // 程序化点击（isTrusted=false）自动放行，只记录按钮位置、不再触发新一轮刷新。
+      document.addEventListener('click', function (e) {
+        var btn = findRollButton(e.target)
+        if (!btn) return
+        btnEl = btn
+        log('检测到点击「换一换」', (btn.className || '') || (btn.textContent || '').trim())
+        if (e.isTrusted !== false) {
+          try {
+            e.preventDefault()
+            e.stopPropagation()
+            if (e.stopImmediatePropagation) e.stopImmediatePropagation()
+          } catch (err) { /* 忽略 */ }
+          // 「换一换按钮位置自定义」把按钮移过位 / 固定时，其“点击后回顶”副作用会被上面的
+          // stopPropagation 一并拦掉，这里按同样逻辑补一次（按钮被自定义过才补）。
+          try {
+            var st = btn.getAttribute('style') || ''
+            if (/translate\(|position:\s*fixed/i.test(st)) {
+              setTimeout(function () {
+                try { global.scrollTo({ top: 0, behavior: 'smooth' }) } catch (err) { global.scrollTo(0, 0) }
+              }, 0)
+            }
+          } catch (err) { /* 忽略 */ }
+          setTimeout(function () { scheduleBoost('click') }, 60)
+        }
+      }, true)
+
+      // 备份触发：卡片被整体换掉（原生刷新）时自动补
+      var lastFirst = ''
+      setInterval(function () {
+        if (busy || Date.now() - lastBoostAt < 4000) return
+        var cards = getCards()
+        if (!cards.length) return
+        var first = bvidOf(cards[0])
+        if (!first) return
+        // 刚改写完的守卫期内：DOM 若被别处动过，交给守卫静默修复，
+        // 绝不再自动补一轮刷新 —— 这是“换完又闪一下/二次刷新”的另一来源
+        if (Date.now() < guardUntil) {
+          lastFirst = first
+          return
+        }
+        var expected = guardItems.length ? guardItems[0].bvid : ''
+        if (lastFirst && first !== lastFirst && first !== expected) {
+          log('检测到首卡变化 → 自动补刷')
+          lastFirst = first
+          boost('dom')
+          return
+        }
+        lastFirst = first
+      }, 800)
+    }
+
+    var entry = async ({ metadata, settings }) => {
+      if (location.pathname !== '/') return
+      log('组件启动', location.href)
+
+      Object.keys(settings.options).forEach(function (optionName) {
+        addComponentListener(
+          metadata.name + '.' + optionName,
+          function (value) {
+            if (optionName === '刷新数量') state.count = Number(value) || 15
+            else if (optionName === '手动输入数量') state.manual = String(value == null ? '' : value)
+            else if (optionName === '显示提示') state.toast = !!value
+            else if (optionName === '过渡动画') state.fade = !!value
+            else if (optionName === '预取下一批') state.prefetch = !!value
+            else if (optionName === '调试日志') state.debug = !!value
+          },
+          true,
+        )
+      })
+
+      installHooks()
+      startGuard()
+      setTimeout(warmup, 2000)
+    }
+
+    return define.defineComponentMetadata({
+      name: 'feed-refresh-boost',
+      author: { name: 'WorkBuddy', link: 'https://www.bilibili.com' },
+      tags: [componentsTags.style],
+      displayName: '换一换 · 刷新更多卡片',
+      entry: entry,
+      options: options,
+      description: {
+        'zh-CN': () =>
+          Promise.resolve(
+            '自定义首页「换一换」按钮刷新视频卡片的数量（默认 15 张），' +
+              '不刷新页面、不会白屏。支持滑块或手动输入数量，带调试日志。',
+          ),
+      },
+    })
+  }
+
+  // ---- 导出：兼容 Bilibili Evolved 安装沙箱（注入 exports）与普通页面环境 ----
+  var metadata = null
+  function factory() {
+    if (!metadata) {
+      metadata = createComponent(coreApis, componentsTags)
+    }
+    return metadata
+  }
+  if (typeof module === 'object' && module && module.exports) {
+    module.exports = factory()
+  } else if (typeof exports === 'object') {
+    exports['style/feed-refresh-boost'] = factory()
+  } else {
+    global['style/feed-refresh-boost'] = factory()
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : window)
