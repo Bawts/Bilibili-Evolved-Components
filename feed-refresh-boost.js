@@ -639,6 +639,24 @@
           hit.title = 1
           titleA.textContent = item.title
           titleA.setAttribute('title', item.title)
+          // 【必须有】标题框 h3 上的 title 属性也要一起换代。
+          // B站 全局样式里有这类规则（text-indent 会被继承，而标题框又是
+          // overflow:hidden + 固定两行高）：
+          //   [title^=「],[title^=『],[title^=【]{text-indent:-.6em}
+          //   .win [title^=《]{text-indent:-.5em}   .win [title^=“]{text-indent:-.1em}
+          //   .win [title^=～]{text-indent:-.25em}  .mac [title^=《]{text-indent:-.4em}
+          // 这些规则本来是给"标题以《/【 开头"时对齐标点墨迹用的。但 h3 上留着的
+          // 还是上个视频的旧标题，旧标题以《/【/～/“ 开头、新标题不是时，首行会被
+          // 左移 0.5em 左右，再被 h3 的 overflow:hidden 裁掉 —— 表现出来就是
+          // "第一个字少了半个"。同步 title 后这套规则会按新标题正确命中。
+          var titleBox =
+            (titleA.closest && titleA.closest('.bili-video-card__info--tit')) ||
+            card.querySelector('.bili-video-card__info--tit')
+          if (titleBox) {
+            titleBox.setAttribute('title', item.title)
+            // 新标题不以那几类标点开头时，把继承来的 text-indent 显式归零，彻底不左移
+            titleBox.style.textIndent = /^[「『【《～“]/.test(item.title) ? '' : '0'
+          }
           if (verbose) log('   标题元素: ' + titleA.outerHTML.slice(0, 240))
         }
 
@@ -815,6 +833,15 @@
           }
         } catch (e) { /* 忽略 */ }
       }
+      try {
+        // 标题文字 + 标题框上的 title 属性都要校验：Vue 重渲染把标题写回旧值时，
+        // 单靠 BV/封面是发现不了的（封面往往没变），而那种"文字是新的、title 属性是旧的"
+        // 状态正是首字被裁的成因，必须让守卫把它修回来。
+        var tA = card.querySelector('.bili-video-card__info--tit a, h3 a')
+        if (tA && item.title && (tA.textContent || '') !== item.title) return false
+        var tB = card.querySelector('.bili-video-card__info--tit')
+        if (tB && item.title && tB.getAttribute('title') !== item.title) return false
+      } catch (e) { /* 忽略 */ }
       try {
         var plW = card.querySelector('.bili-video-card__image--wrap')
         var pl = plW && plW.__INLINE_PLAYER__
