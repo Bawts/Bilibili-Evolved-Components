@@ -1,5 +1,22 @@
 /**
  * Bilibili-Evolved 第三方组件 · 换一换按钮位置自定义
+ *
+ * v2 修复：移动后的按钮"没有手型光标、也没有按下去动画"
+ *   真实页面 + 真实指针事件实测（无头 Firefox，逐场景对比）：
+ *     · 官方按钮结构：<div class="feed-roll-btn"><button class="roll-btn">…
+ *       手型光标与按压缩放来自官方 CSS（.primary-btn 一类规则），动画挂在**按钮本体**上
+ *     · 不动位置 / 只用 transform 位移 → hovered=true、active=true、指针落点 self=true，一切正常
+ *     · 一开「固定显示」→ hovered=false、active=false，指针中心落点是 **DIV.title**，
+ *       它的祖先 DIV.lt-row 是 position:fixed; z-index:10000 的**透明浮层**（登录提示层）
+ *     · 原因：组件只给了 z-index: 1001，被页面里这些 z-index: 10000 级的浮层盖住。
+ *       按钮照样画在屏幕上（浮层是透明的），但鼠标落点是浮层 →
+ *       既没有手型光标，也进不了 :active（按压动画消失），点击同样打不到按钮。
+ *     · 把 z-index 抬到 2147483000 后立刻恢复：指针落点 self=true，按下 active=true。
+ *   修复：① 悬浮/固定一律用最大层叠序，并在应用后做**指针落点自检**，被盖住就自动升级
+ *          并打印一行可操作的自检日志（谁盖的、它的层级）；
+ *         ② 按钮本体绝不再写 transform（否则官方 :active 的按压缩放会被内联 !important
+ *           覆盖，按压动画直接消失），改用 left/top 定位；
+ *         ③ 官方没给手型光标时补上 cursor: pointer。
  */
 
 (() => {
@@ -14,8 +31,14 @@
   const caf = W.cancelAnimationFrame ? W.cancelAnimationFrame.bind(W) : (id) => W.clearTimeout(id)
 
   const COMPONENT_NAME = 'homeRollButtonCustomizer'
-  const Z_INDEX = 1001
+  // 页面里有 z-index:10000 级别的固定浮层，1001 会被盖住（见文件头说明），所以用最大层叠序。
+  const Z_INDEX = 2147483000
   const SCAN_TIMEOUT = 3000
+  const LOG_PREFIX = '[换一换按钮] '
+  // 定位/过渡分工：官方按压反馈与悬浮换色都挂在按钮自己的 transition 上，
+  // 所以被移动的是按钮本体时不能整体掐掉过渡，只把我们用来定位的属性排除出去。
+  const TRANSITION_KEEP =
+    'transition-property: transform, background-color, color, border-color, box-shadow, opacity'
 
   // 「换一换」按钮可能出现的各种选择器, 从具体到宽泛依次尝试
   const BUTTON_SELECTORS = [
@@ -170,15 +193,29 @@
   let buttonBase = null
   let originalCssText = null
   let clickHandler = null
+  // 官方样式没给这个按钮手型光标时（实测计算值就是 default），由组件补上 —— 用户要的"移上去变小手"
+  let needCursor = false
+  let rollButtonEl = null // 真正那个 <button>（被移动的可能是它的容器）
+  let cursorCaptured = false
+  let cursorPrevInline = null
+  let currentOffsetX = 0
+  let currentOffsetY = 0
 
   // 定位模式: none=原样 / fixed=position:fixed / float=滚动跟随
   let mode = 'none'
   let fixedWorks = null // null=尚未测试, true/false=已测
   let floatBase = ''
+  // transform=把位移写在容器 transform 上 / offset=用 left/top（被移动的就是按钮本体时只能用它）
+  let floatStrategy = 'transform'
   let targetLeft = 0
   let targetTop = 0
   let lastDx = 0
   let lastDy = 0
+
+  // 落点自检用
+  let bumpedAncestors = [] // 抬过 z-index 的祖先（卸载时还原）
+  let liftTried = false
+  let lastBlockedKey = ''
 
   let observer = null
   let resizeHandler = null
@@ -201,6 +238,7 @@
   const setButtonStyle = (css) => {
     const head = originalCssText ? `${originalCssText.replace(/;\s*$/, '')};` : ''
     button.setAttribute('style', head + css)
+    applyCursor()
   }
 
   const resetStyle = () => {
@@ -209,6 +247,44 @@
     } else {
       button.removeAttribute('style')
     }
+  }
+
+  // 「移上去变小手」：官方没给才补，官方给了就不动。
+  // 关键：必须写在**按钮本体**上 —— 浏览器的 UA 样式表对 <button> 有自己的 cursor 声明，
+  // 写在容器上不会被按钮继承（实测容器 pointer、按钮仍 default）。
+  const applyCursor = () => {
+    if (!rollButtonEl || !needCursor || options.showHandCursor === false) {
+      return
+    }
+    try {
+      if (!cursorCaptured && rollButtonEl !== button) {
+        cursorPrevInline = rollButtonEl.getAttribute('style')
+        cursorCaptured = true
+      }
+      rollButtonEl.style.setProperty('cursor', 'pointer', 'important')
+    } catch (e) {
+      /* 忽略 */
+    }
+  }
+
+  const clearCursor = () => {
+    if (!rollButtonEl) {
+      return
+    }
+    try {
+      if (cursorCaptured) {
+        if (cursorPrevInline === null) {
+          rollButtonEl.removeAttribute('style')
+        } else {
+          rollButtonEl.setAttribute('style', cursorPrevInline)
+        }
+      }
+      // 被移动的就是按钮本体时，它的 style 由 resetStyle() 负责还原
+    } catch (e) {
+      /* 忽略 */
+    }
+    cursorCaptured = false
+    cursorPrevInline = null
   }
 
   // 在「未施加任何自定义样式」的状态下量一次按钮的原始几何信息(文档坐标), 作为偏移基准。
@@ -243,13 +319,14 @@
 
   // transform 是相对元素自身坐标系的, 不会像 fixed 那样受祖先 transform 干扰;
   // 但每帧都要更新, 所以必须掐掉过渡动画, 否则按钮会拖在滚动后面。
+  // （被移动的是按钮本体时改走 left/top，用过渡白名单而不是整体掐掉，保住官方的按压过渡。）
   const buildFloatBase = () => {
     const parts = []
     if (isStaticPositioned()) {
       parts.push('position: relative')
     }
     parts.push(`z-index: ${Z_INDEX}`)
-    parts.push('transition-duration: 0s')
+    parts.push(floatStrategy === 'offset' ? TRANSITION_KEEP : 'transition-duration: 0s')
     return parts.map((decl) => `${decl} !important`).join(';')
   }
 
@@ -269,7 +346,11 @@
     }
     lastDx = dx
     lastDy = dy
-    setButtonStyle(`${floatBase};transform: translate(${dx}px, ${dy}px) !important;`)
+    const move =
+      floatStrategy === 'offset'
+        ? `left: ${dx}px !important;top: ${dy}px !important;`
+        : `transform: translate(${dx}px, ${dy}px) !important;`
+    setButtonStyle(`${floatBase};${move}`)
   }
 
   const startFloat = () => {
@@ -303,12 +384,9 @@
 
   /* ------------------------------------------------------------ position:fixed 方案 */
 
-  const fixedCss = (left, top) =>
-    [
+  const fixedCss = (left, top) => {
+    const parts = [
       'position: fixed',
-      // 官方容器 .feed-roll-btn 自带 translateX(10px) 之类的 transform, fixed 落位后必须
-      // 清掉, 否则实测位置会整体偏移, 永远匹配不上 → 白白退回滚动跟随方案
-      'transform: none',
       `left: ${left}px`,
       `top: ${top}px`,
       `width: ${buttonBase.width}px`,
@@ -318,8 +396,14 @@
       'margin: 0',
       `z-index: ${Z_INDEX}`,
     ]
-      .map((decl) => `${decl} !important`)
-      .join(';')
+    if (!isButtonElement()) {
+      // 官方容器 .feed-roll-btn 自带 translate(10px) 之类的 transform, fixed 落位后必须清掉,
+      // 否则实测位置会整体偏移, 永远匹配不上 → 白白退回滚动跟随方案。
+      // 但被移动的是按钮本体时绝不能写 transform: none —— 那会把官方 :active 的按压缩放一起清掉。
+      parts.splice(1, 0, 'transform: none')
+    }
+    return parts.map((decl) => `${decl} !important`).join(';')
+  }
 
   // 读取被移动元素「官方自带」的 CSS transform 平移量(调用前必须已清掉本组件的内联样式)。
   // 官方给容器写了 translateX(10px) 之类的位移, 若直接覆盖, 视觉上会突然跳一下;
@@ -350,12 +434,185 @@
     return Math.abs(rect.left - left) <= 2 && Math.abs(rect.top - top) <= 2
   }
 
+  // 位移样式（"只改位置"模式），两条路：
+  //   · 目标是官方容器 → 用 transform，并叠加容器官方的 translate(px)（零跳变）；
+  //   · 目标是**按钮本体** → 一律改用 left/top。因为官方按压反馈是按钮上的
+  //     :active { transform: scale(.95) }，只要按钮上有内联 transform（哪怕不带 !important）
+  //     就会被覆盖，按压动画直接消失。left/top 与 :active 的 transform 互不干扰。
+  // 附带把过渡限制成白名单：官方的按压/悬浮过渡留着，我们用来定位的属性不参与过渡
+  // （否则每帧定位会拖着滚动跑）。
+  const offsetCss = (offsetX, offsetY) => {
+    const native = readNativeTranslate()
+    const x = native.x + offsetX
+    const y = native.y + offsetY
+    if (isButtonElement()) {
+      const parts = ['left: ' + x + 'px', 'top: ' + y + 'px', TRANSITION_KEEP]
+      if (isStaticPositioned()) {
+        parts.push('position: relative')
+      }
+      return parts.map((decl) => `${decl} !important`).join(';')
+    }
+    return `transform: translate(${x}px, ${y}px) !important;`
+  }
+
+  /* ------------------------------------------------- 落点自检（本轮修复的核心） */
+
+  // 被移动的元素是不是「按钮本体」（而不是官方容器 .feed-roll-btn）。
+  // 是本体的话**绝不能**写 transform：官方按压反馈是按钮上的 :active { transform: scale(.95) }，
+  // 内联 !important 的 transform 会把它彻底压掉，按压动画就没了。这种情况改用 left/top 定位。
+  const isButtonElement = () =>
+    !!(button && (button.tagName === 'BUTTON' || button.classList.contains('roll-btn') || button.classList.contains('change-btn')))
+
+  const describeEl = (el) => {
+    if (!el) {
+      return '(无)'
+    }
+    const cls = typeof el.className === 'string' ? el.className.trim().split(/\s+/).slice(0, 3).join('.') : ''
+    let cs = null
+    try {
+      cs = W.getComputedStyle(el)
+    } catch (e) {
+      cs = null
+    }
+    const pos = cs ? cs.position : '?'
+    const z = cs && cs.zIndex !== 'auto' ? ` z-index:${cs.zIndex}` : ''
+    return `<${el.tagName.toLowerCase()}${cls ? ' .' + cls : ''}> ${pos}${z}`
+  }
+
+  const inViewport = (x, y) => x >= 1 && y >= 1 && x <= W.innerWidth - 1 && y <= W.innerHeight - 1
+
+  // 指针落点自检：以**中心点**为准（用户就是照着中心点去指、去点的），
+  // 中心点跑到视口外时退而取最近的可见点。浮层透明时"看得见按钮"≠"点得到按钮"，
+  // 这正是本次 bug 的伪装。
+  const hitTest = () => {
+    if (!button || !D.contains(button) || typeof D.elementFromPoint !== 'function') {
+      return null
+    }
+    const rect = button.getBoundingClientRect()
+    if (rect.width < 2 || rect.height < 2) {
+      return null
+    }
+    const cx = rect.left + rect.width / 2
+    const cy = rect.top + rect.height / 2
+    const candidates = [
+      [cx, cy],
+      [cx, rect.top + 3],
+      [cx, rect.bottom - 3],
+      [rect.left + 3, cy],
+      [rect.right - 3, cy],
+    ].filter((pt) => inViewport(pt[0], pt[1]))
+    if (!candidates.length) {
+      return null // 按钮整块在视口外，测不了
+    }
+    let hit = null
+    try {
+      hit = D.elementFromPoint(candidates[0][0], candidates[0][1])
+    } catch (e) {
+      return null
+    }
+    if (!hit || hit === button || button.contains(hit)) {
+      return null
+    }
+    return { blocker: hit }
+  }
+
+  // 升级手段：把"已经是层叠上下文"的已定位祖先抬一层。
+  // 只动这类祖先（z-index 非 auto 的已定位元素）——抬它不会改布局；
+  // position:relative + z-index:auto 的祖先本来就不创建层叠上下文，我们的最大 z-index 能直接越过去。
+  const liftPositionedAncestors = () => {
+    if (liftTried || !button) {
+      return
+    }
+    liftTried = true
+    let el = button.parentElement
+    let depth = 0
+    while (el && el !== D.body && depth < 12) {
+      let cs = null
+      try {
+        cs = W.getComputedStyle(el)
+      } catch (e) {
+        cs = null
+      }
+      if (cs && cs.position !== 'static' && cs.zIndex !== 'auto') {
+        bumpedAncestors.push({ el: el, cssText: el.getAttribute('style') })
+        el.style.setProperty('z-index', String(Z_INDEX), 'important')
+      }
+      el = el.parentElement
+      depth++
+    }
+    return bumpedAncestors.length
+  }
+
+  const restoreLiftedAncestors = () => {
+    for (let i = 0; i < bumpedAncestors.length; i++) {
+      const it = bumpedAncestors[i]
+      if (it.cssText === null) {
+        it.el.removeAttribute('style')
+      } else {
+        it.el.setAttribute('style', it.cssText)
+      }
+    }
+    bumpedAncestors = []
+    liftTried = false
+    lastBlockedKey = ''
+  }
+
+  // 应用完样式后立刻自检：被盖住 → 自动升级 + 打印一行可操作日志（同一种情况只报一次）
+  const verifyReachability = () => {
+    // 位置一个都没动时不插手（除了补光标），免得平白给页面加层叠序
+    if (mode === 'none' && currentOffsetX === 0 && currentOffsetY === 0) {
+      return
+    }
+    const bad = hitTest()
+    if (!bad) {
+      lastBlockedKey = ''
+      return
+    }
+    const blocker = bad.blocker
+    const key = describeEl(blocker) + '@' + describeEl(button)
+    if (lastBlockedKey === key) {
+      return
+    }
+    lastBlockedKey = key
+    const zBefore = W.getComputedStyle(button).zIndex
+    // 升级一：固定/悬浮模式本来就已经是最大层叠序（根因就是 1001 太小），
+    // 这里只处理"只改位置"模式 —— 它刻意不碰层叠序，被盖住时补上 position + 最大 z-index。
+    if (mode !== 'fixed' && mode !== 'float') {
+      let css = offsetCss(currentOffsetX, currentOffsetY)
+      if (W.getComputedStyle(button).position === 'static') {
+        css += ';position: relative !important'
+      }
+      css += `;z-index: ${Z_INDEX} !important`
+      setButtonStyle(css)
+    }
+    // 升级二：仍被盖住时，抬"已创建层叠上下文"的已定位祖先
+    let lifted = 0
+    if (hitTest()) {
+      lifted = liftPositionedAncestors() || 0
+    }
+    const stillBad = hitTest()
+    const how =
+      !stillBad
+        ? lifted
+          ? `已自动修复（抬起了 ${lifted} 个上层容器）`
+          : '已自动修复（层叠序提到最大）'
+        : '仍被遮挡，需要继续排查'
+    console.warn(
+      `${LOG_PREFIX}按钮被别的元素盖住了：指针落点是 ${describeEl(blocker)}，` +
+        `按钮自身 z-index 原为 ${zBefore}。这会导致「没有小手、没有按压动画、点了没反应」。${how}`
+    )
+  }
+
+
+
   /* ---------------------------------------------------------------- 按钮生命周期 */
 
   const restoreButton = () => {
     stopFloat()
     mode = 'none'
     fixedWorks = null
+    restoreLiftedAncestors()
+    lastBlockedKey = ''
     if (clickHandler && button) {
       button.removeEventListener('click', clickHandler)
     }
@@ -363,9 +620,14 @@
     if (button) {
       resetStyle()
     }
+    clearCursor()
     button = null
+    rollButtonEl = null
     buttonBase = null
     originalCssText = null
+    needCursor = false
+    currentOffsetX = 0
+    currentOffsetY = 0
   }
 
   const ensureButton = () => {
@@ -381,6 +643,17 @@
     originalCssText = button.getAttribute('style')
     buttonBase = measureBase()
     fixedWorks = null
+    // 真正那个按钮（被移动的可能是它的官方容器），"小手"必须写在它身上
+    rollButtonEl =
+      button.tagName === 'BUTTON' || button.classList.contains('roll-btn') || button.classList.contains('change-btn')
+        ? button
+        : button.querySelector('button, .roll-btn, .change-btn') || button
+    // 官方样式给没给手型光标？（实测 2026 版首页的 .roll-btn 计算值是 default，没给）
+    try {
+      needCursor = W.getComputedStyle(rollButtonEl).cursor !== 'pointer'
+    } catch (e) {
+      needCursor = false
+    }
     clickHandler = (event) => {
       if (!options.scrollToTopOnClick) {
         return
@@ -418,21 +691,25 @@
     const offsetY =
       toNumber(options.offsetY, 0) + toNumber(options.offsetYFine, 0)
 
+    currentOffsetX = offsetX
+    currentOffsetY = offsetY
+
     if (!options.fixed) {
       stopFloat()
       mode = 'none'
       resetStyle()
-      // 两个偏移都是 0 时干脆什么都不加, 保证按钮与原生状态完全一致
+      // 两个偏移都是 0 时除了补一个手型光标什么都不加, 位置与原生完全一致
       if (offsetX !== 0 || offsetY !== 0) {
-        // 位移只写在「外层容器」上且叠加容器官方的 transform。按钮元素自身绝不能出现
-        // 内联 transform —— 官方按压反馈是 .primary-btn:active { transform: scale(.95) },
-        // 只要按钮上有内联 transform(哪怕不带 !important)就会被覆盖, 按压动画即消失;
-        // 而 svg 的转圈动画属于 svg 自身, 也不要去动它。
-        const native = readNativeTranslate()
-        setButtonStyle(
-          `transform: translate(${native.x + offsetX}px, ${native.y + offsetY}px) !important;`
-        )
+        // 位移优先写在外层容器上（并叠加容器官方的 translate）。按钮元素自身绝不能出现
+        // 内联 transform —— 官方按压反馈是按钮上的 :active { transform: scale(.95) }，
+        // 只要按钮上有内联 transform(哪怕不带 !important)就会被覆盖，按压动画即消失；
+        // 而 svg 的转圈动画属于 svg 自身，也不要去动它。
+        setButtonStyle(offsetCss(offsetX, offsetY))
+      } else {
+        // 位置一个都不动，只把官方缺失的手型光标补上（不改位置、不改官方任何样式）
+        applyCursor()
       }
+      verifyReachability()
       return
     }
 
@@ -442,6 +719,7 @@
     const maxTop = Math.max(0, W.innerHeight - buttonBase.height)
     targetLeft = clamp(buttonBase.left + offsetX, 0, maxLeft)
     targetTop = clamp(buttonBase.top + offsetY, 0, maxTop)
+    floatStrategy = isButtonElement() ? 'offset' : 'transform'
 
     // 方案 (a): position: fixed
     if (fixedWorks !== false) {
@@ -452,6 +730,7 @@
       if (positionMatches(targetLeft, targetTop)) {
         fixedWorks = true
         mode = 'fixed'
+        verifyReachability()
         return
       }
       fixedWorks = false
@@ -469,6 +748,7 @@
       startFloat()
     }
     updateFloat()
+    verifyReachability()
   }
 
   const scheduleApply = debounce(apply, 150)
@@ -557,6 +837,10 @@
         defaultValue: true,
         displayName: '点击后回到页面顶部',
       },
+      showHandCursor: {
+        defaultValue: true,
+        displayName: '鼠标移上去显示小手 (官方样式没给，由本组件补上)',
+      },
       buttonSelector: {
         defaultValue: '',
         displayName: '按钮选择器 (留空自动识别)',
@@ -578,6 +862,7 @@
           'offsetYFine',
           'fixed',
           'scrollToTopOnClick',
+          'showHandCursor',
           'buttonSelector',
         ].forEach((key) => {
           settingsApi.addComponentListener(`${COMPONENT_NAME}.${key}`, () => apply())

@@ -1,5 +1,20 @@
 /**
- * Bilibili Evolved 自定义组件：换一换 · 刷新更多卡片  feed-refresh-boost  (v3.1)
+ * Bilibili Evolved 自定义组件：换一换 · 刷新更多卡片  feed-refresh-boost  (v3.2)
+ *
+ * v3.2 修复：刷新后有时点开的仍是旧视频（href 被 Vue 按旧数据回写）
+ *   线上 bundle（laputa-home/assets/index-*.js，BiliVideoCard）实测：
+ *     · 封面/标题锚点的 href 不是静态值，而是 computed pageUrlWithProgress
+ *         = info.url（旧 bvid） + (currentSeekTime>5 ? '?t=' + 进度 : '') + trackid
+ *     · 悬浮预览播放时底层每隔 1s 抛 time-update → onPlayerSeek → currentSeekTime++
+ *     · currentSeekTime 一变，pageUrlWithProgress 就变 → Vue 重渲染时把 href
+ *       按 **props.info（旧视频）** 重新写回 DOM（本脚本改的是 DOM，Vue 数据没变）
+ *     · 实测：computed 值没变时 Vue 不会写 href（脚本的改写能留住）；
+ *             computed 值一变就立刻写回 —— 即预览播到第 6 秒后**每秒都被打回旧视频**
+ *     · 而 v3.1 的守卫对"正在悬浮预览的卡片"是整卡跳过的（怕掐掉预览），
+ *       恰好就是用户鼠标停在卡上、准备点击的那一刻 → 点下去打开旧视频。
+ *   修复：① 预览活跃时也做"轻量修复"（只写回链接，不碰播放器）；
+ *         ② 点击捕获阶段兜底 —— 卡片展示的仍是我们的内容、链接却指着旧视频时，
+ *            拦下默认跳转，自己按正确地址打开（见 onFeedClick）。
  */
 ;(function (global) {
   'use strict'
@@ -114,6 +129,16 @@
     if (!u) return ''
     if (u.indexOf('@') === -1) u += '@672w_378h_1c.webp'
     return u
+  }
+
+  // 封面文件名（去掉 CDN 目录与 @ 参数），用来判断"这张卡展示的还是不是我们那条内容"
+  function coverFile(pic) {
+    try { return coverUrl(pic).split('/').pop().split('@')[0] } catch (e) { return '' }
+  }
+
+  // 首页卡片的官方链接形状：//www.bilibili.com/video/BVxxx/
+  function videoPageUrl(bvid) {
+    return '//www.bilibili.com/video/' + bvid + '/'
   }
 
   function formatCount(n) {
@@ -584,6 +609,126 @@
     }
 
 
+    // ---- 防伪标记：把"这张卡显示的是谁"钉在元素上 ----
+    // 为什么要钉：本脚本改的是 DOM，Vue 的 props.info 没变，所以只要它那侧有个
+    // reactive 值在变（首页就是悬浮预览的播放进度），重渲染就会把 href 按旧视频写回去。
+    // 而**标题文字** Vue 不会回写（文本节点是"值不同才写"，它的值一直没变过），
+    // 于是"标题还是我们写的那句"就成了"这位置展示的确实是我们的内容"的可靠凭证；
+    // 封面文件名与目标 URL 一并记下，前者作老版本卡片的兜底判据，后者供点击兜底直接跳转。
+    function markBoosted(card, item) {
+      try {
+        card.setAttribute('data-be-boosted', String(item.bvid))
+        card.setAttribute('data-be-boost-title', String(item.title || ''))
+        card.setAttribute('data-be-boost-pic', coverFile(item.pic))
+        card.setAttribute('data-be-boost-url', videoPageUrl(item.bvid))
+      } catch (e) { /* 忽略 */ }
+    }
+
+    // 轻量修复：只把"会被 Vue 重渲染写回"的两项写回去 —— 视频链接 href 与标题框 title。
+    // 悬浮预览播放中（容器带 mouse-in/visible）时整卡 patchCard 会 cancel/purge 播放器，
+    // 把用户正在看的预览掐掉，所以 v3.1 是直接跳过；但恰恰是这个时候首页的 href 正被
+    // Vue 按旧视频回写（预览播到第 6 秒后每秒一次），跳过 = 放任点错视频。
+    function patchLinksOnly(card, item) {
+      if (!card || !item || !item.bvid) return false
+      var changed = false
+      try {
+        var href = '/video/' + item.bvid
+        var links = card.querySelectorAll('a[href*="/video/"]')
+        for (var i = 0; i < links.length; i++) {
+          if (links[i].getAttribute('href') !== href) {
+            links[i].setAttribute('href', href)
+            changed = true
+          }
+          if (!links[i].getAttribute('target')) links[i].setAttribute('target', '_blank')
+        }
+        var tB = card.querySelector('.bili-video-card__info--tit')
+        if (tB && item.title && tB.getAttribute('title') !== item.title) {
+          tB.setAttribute('title', item.title)
+          changed = true
+        }
+        markBoosted(card, item)
+      } catch (e) { /* 忽略 */ }
+      return changed
+    }
+
+    function titleTextOf(card) {
+      try {
+        var tA = card.querySelector('.bili-video-card__info--tit a, h3 a')
+        return tA ? String(tA.textContent || '').trim() : ''
+      } catch (e) { return '' }
+    }
+
+    function coverFileOfCard(card) {
+      try {
+        var img = card.querySelector('picture img, img')
+        var src = img ? String(img.getAttribute('src') || '') : ''
+        return src ? src.split('/').pop().split('@')[0] : ''
+      } catch (e) { return '' }
+    }
+
+    // ---- 点击兜底：点下去的那一刻，"谁在显示"就打开谁 ----
+    // 捕获阶段接管，早于锚点自身的 onClick，也早于浏览器按 href 跳转。
+    // 只在"卡片展示的仍是我们的内容、但链接指着旧视频"时才动手，其余一律放行。
+    function onFeedClick(e) {
+      try {
+        if (e.button !== 0 && e.button !== 1) return
+        if (e.defaultPrevented) return
+        var t = e.target
+        if (!t || !t.closest) return
+        // 只接管"视频链接"上的点击：UP 名（space.bilibili.com）等一律不碰
+        var a = t.closest('a[href*="/video/"]')
+        if (!a) return
+        var card = a.closest('.bili-video-card')
+        if (!card || !card.getAttribute) return
+        var want = card.getAttribute('data-be-boosted')
+        if (!want) return
+        // 卡片内还有别的可点控件（稍后再看 bili-watch-later / 不感兴趣面板等）也长在封面
+        // 锚点里，它们点了不是"打开视频"，一律放行；封面遮罩里的统计区不算控件，不排除。
+        for (var d = 0, node = t; d < 5 && node && node !== card; d++) {
+          var cls = typeof node.className === 'string' ? node.className : ''
+          if (node.tagName === 'BUTTON' || /watch-later|watchLater|no-interest|complain|tips/.test(cls)) return
+          node = node.parentElement
+        }
+        // 凭证校验：**标题文字是主凭证** —— 文案只有在 Vue 那侧的数据真的变了时才会被
+        // 重写（文本节点是"值不同才写"），而封面图由懒加载组件 VImg 托管、可能被它按
+        // props 重新写回，不适合当门禁。所以：
+        //   标题标记存在 → 标题必须对得上；标记缺失（老版本留下的卡）时才退回看封面。
+        // 标题对不上 = 这位置已经真的换成别的视频了（例如原生换一换），一律放行。
+        var wantTitle = card.getAttribute('data-be-boost-title') || ''
+        var wantPic = card.getAttribute('data-be-boost-pic') || ''
+        var okTitle = !!wantTitle && titleTextOf(card) === wantTitle
+        var okPic = !!wantPic && coverFileOfCard(card) === wantPic
+        if (!(wantTitle ? okTitle : okPic)) return
+        // 链接本来就是新视频 → 完全交给浏览器默认行为，不做任何干预
+        if (bvidOf(card) === want) return
+
+        var url = card.getAttribute('data-be-boost-url') || videoPageUrl(want)
+        log('点击兜底：链接已被回写成旧视频，按卡片展示内容打开 ' + url)
+        e.preventDefault()
+        e.stopPropagation()
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation()
+        // 顺手把 DOM 也扶正（不影响本次跳转，只让下次点击/中键不再踩坑）
+        try {
+          var links = card.querySelectorAll('a[href*="/video/"]')
+          for (var k = 0; k < links.length; k++) links[k].setAttribute('href', url)
+        } catch (e2) { /* 忽略 */ }
+        // 官方点击副作用里唯一有用的一项：清掉续播进度，免得下次悬浮接着上次播
+        try {
+          var bx = card.querySelectorAll('.v-inline-player, .v-inline-live-player')
+          for (var b = 0; b < bx.length; b++) bx[b].removeAttribute('data-player-seek-time')
+        } catch (e3) { /* 忽略 */ }
+        var newTab = e.button === 1 || e.ctrlKey || e.metaKey ||
+          String(a.getAttribute('target') || '') === '_blank'
+        if (newTab) {
+          var w = null
+          try { w = global.open(url, '_blank') } catch (e4) { w = null }
+          if (!w) global.location.href = url
+        } else {
+          global.location.href = url
+        }
+      } catch (e5) { /* 忽略 */ }
+    }
+
     function patchCard(card, item, verbose) {
       var hit = { img: 0, title: 0, up: 0, stats: 0, dur: 0, links: 0 }
       try {
@@ -736,7 +881,7 @@
           purgeInlinePlayer(iwWrap)
         } catch (e3) { /* 忽略 */ }
 
-        card.setAttribute('data-be-boosted', bvid)
+        markBoosted(card, item)
         if (verbose) log('  卡片细节 ' + JSON.stringify(hit))
         return true
       } catch (e) {
@@ -791,17 +936,24 @@
         return
       }
       var cards = getCards()
-      var fixed = 0
+      var fixedFull = 0
+      var fixedLight = 0
       for (var i = 0; i < guardItems.length && i < cards.length; i++) {
-        if (isCardPreviewActive(cards[i])) continue
-        if (!cardMatches(cards[i], guardItems[i])) {
+        if (cardMatches(cards[i], guardItems[i])) continue
+        if (isCardPreviewActive(cards[i])) {
+          // 正在悬浮预览：不能整卡改写（会 cancel/purge 掉用户正看的播放器），
+          // 但**链接必须修** —— 预览播到第 6 秒起，Vue 每秒都会把 href 按旧视频
+          // 写回去；不管它，用户此刻（鼠标就停在卡上）一点就是旧视频。
+          if (patchLinksOnly(cards[i], guardItems[i])) fixedLight++
+        } else {
           patchCard(cards[i], guardItems[i])
-          fixed++
+          fixedFull++
         }
       }
-      if (fixed && repairCount < 6) {
+      if (fixedFull && repairCount < 6) {
         repairCount++
-        log('守卫修复 ' + fixed + ' 张（第 ' + repairCount + ' 轮）')
+        log('守卫修复 ' + fixedFull + ' 张（第 ' + repairCount + ' 轮）' +
+          (fixedLight ? '，另有 ' + fixedLight + ' 张预览中只修链接' : ''))
       }
     }
 
@@ -1283,6 +1435,10 @@
           setTimeout(function () { scheduleBoost('click') }, 60)
         }
       }, true)
+
+      // 点击兜底：接管"链接已被 Vue 回写成旧视频"的那一次跳转（含中键/新标签页）
+      document.addEventListener('click', onFeedClick, true)
+      document.addEventListener('auxclick', onFeedClick, true)
 
       // 备份触发：卡片被整体换掉（原生刷新）时自动补
       var lastFirst = ''
