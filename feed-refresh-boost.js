@@ -1,7 +1,31 @@
 /**
- * Bilibili Evolved 自定义组件：换一换 · 刷新更多卡片  feed-refresh-boost  (v3.2)
+ * Bilibili Evolved 自定义组件：换一换 · 刷新更多卡片  feed-refresh-boost  (v3.4)
  *
- * v3.2 修复：刷新后有时点开的仍是旧视频（href 被 Vue 按旧数据回写）
+ * v3.4 修复：刷新后卡片上的发布时间不动，一直停在刷新前那条视频的日期
+ *   线上 bundle（laputa-home/index-*.js，BiliVideoCard）实测：
+ *     · UP 名后面那截「· 10月16日」是 <span class="bili-video-card__info--date">，
+ *       文本 = "· " + formats.pubdate
+ *     · formats 是 computed：pubdate: formatPassedTime(info.pubdate * 1e3)
+ *       → kR(lang, ts)，参数取默认 bR(undefined) = {autoTime:true, forceTime:false}
+ *     · 本脚本只改 DOM，info.pubdate 没变 → 这个 computed 恒为旧值 →
+ *       Vue 重渲染时既不会更新它（TEXT 判定值没变），脚本也从没写过它 →
+ *       日期永远停在开局那张卡上
+ *   v3.3 的头注释写了"修复"，但**代码里一行都没落地**（只有注释，没有实现），
+ *   所以现象照旧。v3.4 补上实现：
+ *   ① formatPubdate()：逐分支复刻线上 kR 的中文文案
+ *      （刚刚 / N分钟前 / N小时前 / 昨天 HH:mm / N天前 / M月D日 / YYYY年M月D日），
+ *      并补上官方 v>now 的预约分支（今天/明天 + HH:mm）；
+ *   ② patchDate()：改写 .bili-video-card__info--date 的文本（含 "· " 前缀），
+ *      原卡没有该节点时按 UP 名锚点补一个同 class 的 span，
+ *      新数据没给 pubdate 时清掉旧文案（Vue 自有节点只清文本不摘节点，
+ *      避免打乱 patchChildren 锚点）；
+ *   ③ 接入三条路径：patchCard（整卡改写）/ patchLinksOnly（预览中轻量修复）/
+ *      cardMatches（守卫校验）—— 少了 cardMatches 这一条，BV 与封面都对、
+ *      只有日期是旧的那种卡会被判为"已就绪"，旧日期就再没人修。
+ *   注：0 点跨天后，"N天前/昨天"会随时间自然滚动，cardMatches 按当前时间重算，
+ *       守卫期内的滚动修复属正常现象，不算异常。
+ *
+ * v3.3 修复：刷新后有时点开的仍是旧视频（href 被 Vue 按旧数据回写）
  *   线上 bundle（laputa-home/assets/index-*.js，BiliVideoCard）实测：
  *     · 封面/标题锚点的 href 不是静态值，而是 computed pageUrlWithProgress
  *         = info.url（旧 bvid） + (currentSeekTime>5 ? '?t=' + 进度 : '') + trackid
@@ -156,6 +180,76 @@
     var s = Math.floor(sec % 60)
     function pad(x) { return x < 10 ? '0' + x : String(x) }
     return h > 0 ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s)
+  }
+
+  // ==================== 发布时间文案（复刻 B 站 formatPassedTime） ====================
+  // 依据线上 laputa-home/assets/index-*.js 的 kR(t, n, r) / fa(...) / Za(...) 逐分支还原，
+  // 参数取调用点实际用的默认值 formatPassedTime(t) → kR(lang, t, undefined)：
+  //   bR(undefined) = { autoTime: true, forceTime: false, showSecond: false }
+  // 分支顺序与返回文案（zh-Hans）：
+  //   1) now - 60s  < v            → 刚刚                        (Za(..., 0, 'second'))
+  //   2) now - 1h   < v            → N分钟前                     (Za(..., -floor((now-v)/6e4), 'minute'))
+  //   3) now - 1d   < v            → N小时前                      (Za(..., -floor((now-v)/36e5), 'hour'))
+  //   4) 昨天 00:00 < v            → 昨天 HH:mm   ← autoTime=true，fa(...{mode:'time'})
+  //   5) 今天 00:00 - 3d < v       → N天前        ← forceTime=false，不再后缀时间
+  //   6) 其他，同年                → M月D日       (Kp(false,false) = 'monthDay')
+  //      其他，跨年                → YYYY年M月D日 (Wp(false,false) = 'date')
+  // 注意 4) 与 5) 的不对称是官方原样：昨天带时分，N天前不带。
+  function pad2(n) { return n < 10 ? '0' + n : String(n) }
+
+  function formatPubdate(pubdate, nowMs) {
+    var v = Number(pubdate)
+    if (!isFinite(v) || v <= 0) return ''
+    v = v * 1000 // 接口给的是秒
+    var now = nowMs || Date.now()
+    var today = new Date(now)
+    today.setHours(0, 0, 0, 0)
+    var k = +today // 今天 00:00
+    var d, hm
+    // 0) 未来时间（预约/首播）：官方走另一支，是"今天/明天 + 时分"或"日期 + 时分"
+    if (now < v) {
+      var nextDay = k + 864e5
+      d = new Date(v)
+      hm = pad2(d.getHours()) + ':' + pad2(d.getMinutes())
+      if (v >= k && v < nextDay) return '今天 ' + hm
+      if (v >= nextDay && v < nextDay + 864e5) return '明天 ' + hm
+      var mdF = d.getMonth() + 1 + '月' + d.getDate() + '日'
+      return d.getFullYear() === new Date(now).getFullYear()
+        ? mdF + ' ' + hm
+        : d.getFullYear() + '年' + mdF + ' ' + hm
+    }
+    if (now - 6e4 < v) return '刚刚'
+    // 官方写法是 Za(d, -N, 'unit')：负号是传给 dayjs 表示"过去"的语义，
+    // 中文文案由 dayjs 自己拼。这里直接拼中文，所以必须取正数，否则会输出 "-3分钟前"。
+    if (now - 36e5 < v) return Math.floor((now - v) / 6e4) + '分钟前'
+    if (now - 864e5 < v) return Math.floor((now - v) / 36e5) + '小时前'
+    if (k - 864e5 < v) {
+      d = new Date(v)
+      return '昨天 ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes())
+    }
+    if (k - 864e5 * 3 < v) return Math.ceil((k - v) / 864e5) + '天前'
+    d = new Date(v)
+    var md = d.getMonth() + 1 + '月' + d.getDate() + '日'
+    return d.getFullYear() === new Date(now).getFullYear() ? md : d.getFullYear() + '年' + md
+  }
+
+  // 卡片上那一截的真实文本：模板是 "· " + formats.pubdate（·与空格都是模板里写死的）
+  function dateTextFor(item, nowMs) {
+    var s = item ? formatPubdate(pubdateOf(item), nowMs) : ''
+    return s ? '· ' + s : ''
+  }
+
+  // 从接口条目里取发布时间（秒）。
+  // 首页 rcmd 的 item 里是顶层 pubdate；但部分业务线把它塞在 archive / 上层字段里，
+  // 这里做一次兜底提取，免得"接口其实给了日期、只是路径不同"又被当成没数据。
+  function pubdateOf(item) {
+    if (!item) return 0
+    var cands = [item.pubdate, item.archive && item.archive.pubdate, item.ctime, item.pub_time]
+    for (var i = 0; i < cands.length; i++) {
+      var v = Number(cands[i])
+      if (isFinite(v) && v > 0) return v
+    }
+    return 0
   }
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms) }) }
@@ -621,7 +715,67 @@
         card.setAttribute('data-be-boost-title', String(item.title || ''))
         card.setAttribute('data-be-boost-pic', coverFile(item.pic))
         card.setAttribute('data-be-boost-url', videoPageUrl(item.bvid))
+        // 日期同样要钉住：它是"这张卡展示的是谁"的一部分，守卫与点击兜底都读它
+        card.setAttribute('data-be-boost-date', dateTextFor(item))
       } catch (e) { /* 忽略 */ }
+    }
+
+    // ---- 发布时间：写进 .bili-video-card__info--date ----
+    // 线上模板：<span class="bili-video-card__info--date">· {{formats.pubdate}}</span>
+    // formats.pubdate 是 computed（info.pubdate 派生），Vue 只在**它的值变了**才重写这个
+    // 文本节点。本组件不动 info.pubdate，所以：① 不写它 = 永远停在开局那条视频的日期；
+    // ② 写进去之后 Vue 也不会来覆盖（值没变过 = patchFlag TEXT 判定相等 → 不写 DOM）。
+    // 唯一会被覆盖的时机是整卡被 Vue 重新挂载（原生换一换/分页），那时守卫会补回。
+    // 返回：0 = 无需/无法改写，1 = 已写（全新），2 = 原卡本无日期节点，补了一个
+    function patchDate(card, item) {
+      if (!card || !item) return 0
+      var want = dateTextFor(item)
+      var box = card.querySelector('.bili-video-card__info--date, [class*="info--date"]')
+      if (!want) {
+        // 新数据没给 pubdate（部分广告/直播卡）：别留下一条张冠李戴的日期。
+        // Vue 自己的节点只清文本、不摘节点 —— 删掉它会打乱 Vue patchChildren 的锚点定位，
+        // 导致后续兄弟节点（UP 名链接等）被错位重排。
+        if (box) {
+          if (box.getAttribute('data-be-boost-date-added')) {
+            if (box.parentNode) box.parentNode.removeChild(box)
+          } else if (box.textContent) {
+            box.textContent = ''
+          } else {
+            return 0
+          }
+          return 1
+        }
+        return 0
+      }
+      if (!box) {
+        // 原卡没有日期节点（老版卡片/pubdate 为 0 的那张）→ 在 UP 名后面补一个同 class 的 span。
+        // 定位锚：UP 名 span（.bili-video-card__info--author）之后；找不到就退到 info 区末尾。
+        var anchor =
+          card.querySelector('.bili-video-card__info--author, [class*="info--author"]') ||
+          card.querySelector('.bili-video-card__info--owner, [class*="info--owner"]')
+        var host = anchor && anchor.parentNode
+        if (!host) {
+          host = card.querySelector('.bili-video-card__info--bottom, .bili-video-card__info')
+        }
+        if (!host) return 0
+        box = document.createElement('span')
+        box.className = 'bili-video-card__info--date'
+        box.textContent = want
+        // 打标记：只有我们自己补的节点才允许删除，Vue 的节点一律只改文本（删了会打乱它的
+        // patchChildren 锚点定位）
+        box.setAttribute('data-be-boost-date-added', '1')
+        if (anchor && anchor.parentNode === host && anchor.nextSibling) {
+          host.insertBefore(box, anchor.nextSibling)
+        } else {
+          host.appendChild(box)
+        }
+        return 2
+      }
+      if ((box.textContent || '') !== want) {
+        box.textContent = want
+        return 1
+      }
+      return 0
     }
 
     // 轻量修复：只把"会被 Vue 重渲染写回"的两项写回去 —— 视频链接 href 与标题框 title。
@@ -646,6 +800,9 @@
           tB.setAttribute('title', item.title)
           changed = true
         }
+        // 日期也走轻量修复：它只是 info 区里的一段文本，不碰播放器，预览中改它也安全。
+        // 而且 Vue 重新挂载整卡时会把日期一起带回旧值，正是这个路径要补的。
+        if (patchDate(card, item)) changed = true
         markBoosted(card, item)
       } catch (e) { /* 忽略 */ }
       return changed
@@ -730,7 +887,7 @@
     }
 
     function patchCard(card, item, verbose) {
-      var hit = { img: 0, title: 0, up: 0, stats: 0, dur: 0, links: 0 }
+      var hit = { img: 0, title: 0, up: 0, stats: 0, dur: 0, date: 0, links: 0 }
       try {
         if (!card || !item) return false
         var bvid = item.bvid
@@ -854,6 +1011,11 @@
           if (dur && ds) { hit.dur = 1; dur.textContent = ds }
         }
 
+        // ---- 发布时间 ----
+        // 必须单独写：它是 computed formats.pubdate 的渲染色，跟 view/danmaku/duration
+        // 一样是文本节点，但**本组件从来没碰过它**，所以刷新后它一直停在旧视频上。
+        hit.date = patchDate(card, item)
+
         // ---- 悬浮预览同步 ----
         // 首页悬浮预览是 .bili-video-card__image--wrap 上的 v-inline-player 指令实现的:
         // 挂载时把 aid/cid/bvid 快照进 element.__INLINE_PLAYER__.option, 鼠标移上去时才
@@ -946,8 +1108,9 @@
           // 写回去；不管它，用户此刻（鼠标就停在卡上）一点就是旧视频。
           if (patchLinksOnly(cards[i], guardItems[i])) fixedLight++
         } else {
-          patchCard(cards[i], guardItems[i])
-          fixedFull++
+          // 只统计真的改动了东西的：patchCard 恒返回 true 会让"每轮都修了 N 张"的日志
+          // 把"日期随时间自然滚动"也报成异常修复。
+          if (patchCard(cards[i], guardItems[i])) fixedFull++
         }
       }
       if (fixedFull && repairCount < 6) {
@@ -1000,7 +1163,35 @@
         var po = pl && pl.option
         if (po && po.bvid && item.bvid && po.bvid !== item.bvid) return false
       } catch (e) { /* 忽略 */ }
+      try {
+        // 日期必须校验：不校验的话，卡片的 BV/封面/标题全对、只有日期还是旧的，
+        // cardMatches 会返回 true → 守卫认为"已就绪"，那条旧日期就永远没人修了。
+        // 这里按"当前时间"重新算一遍期望文案（跨分钟/跨天会自然滚动）。
+        var wantDate = dateTextFor(item)
+        var gotDate = dateTextOfCard(card)
+        if (wantDate && gotDate !== wantDate) {
+          // 已有节点但文案不对 → 一定要修。
+          if (gotDate) return false
+          // 根本没有日期节点：只有确实能补进去（卡里有 info 区锚点）才算不匹配，
+          // 否则 patchDate 会一直返回 0，而这里一直返回 false → 守卫每 250ms 空转一轮。
+          if (
+            card.querySelector(
+              '.bili-video-card__info--bottom, .bili-video-card__info, ' +
+                '[class*="info--author"], [class*="info--owner"]'
+            )
+          ) {
+            return false
+          }
+        }
+      } catch (e) { /* 忽略 */ }
       return true
+    }
+
+    function dateTextOfCard(card) {
+      try {
+        var b = card && card.querySelector('.bili-video-card__info--date, [class*="info--date"]')
+        return b ? String(b.textContent || '') : ''
+      } catch (e) { return '' }
     }
 
     function startGuard() {
